@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.env
+__pycache__/
+*.pyc
+posts.json
+export_posts.py
+scrape_posts.py
+build_catalog.py
