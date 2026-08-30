@@ -2,12 +2,15 @@ import os
 import json
 import random
 import time
+import re
+from difflib import SequenceMatcher
 
 import requests
 import vk_api
 
 from dotenv import load_dotenv
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
 
 # =========================================================
@@ -27,7 +30,7 @@ if not KIE_API_KEY:
 
 
 # =========================================================
-# 2. КАТАЛОГ МАТЕРИАЛОВ
+# 2. КАТАЛОГ
 # =========================================================
 
 with open("materials.json", "r", encoding="utf-8") as file:
@@ -50,7 +53,7 @@ def create_longpoll():
 
 
 # =========================================================
-# 4. KIE
+# 4. KIE AI
 # =========================================================
 
 KIE_URL = (
@@ -60,75 +63,217 @@ KIE_URL = (
 
 
 # =========================================================
-# 5. АКТИВИРОВАННЫЕ ПОЛЬЗОВАТЕЛИ
+# 5. СОСТОЯНИЕ
 # =========================================================
 
-# Здесь хранятся пользователи,
-# которые отправили точное слово BUNNY
+# Здесь находятся пользователи,
+# которые уже написали точное BUNNY
+# и сейчас могут отправить ОДИН поисковый запрос.
 active_users = set()
 
 
 # =========================================================
-# 6. ПРЕДВАРИТЕЛЬНЫЙ ПОИСК
+# 6. КНОПКИ
 # =========================================================
+
+def result_keyboard():
+
+    keyboard = VkKeyboard(
+        one_time=True,
+        inline=False
+    )
+
+    keyboard.add_button(
+        "🔎 Новый поиск",
+        color=VkKeyboardColor.PRIMARY,
+        payload={
+            "action": "new_search"
+        }
+    )
+
+    keyboard.add_line()
+
+    keyboard.add_button(
+        "💬 Написать преподавателю",
+        color=VkKeyboardColor.SECONDARY,
+        payload={
+            "action": "teacher"
+        }
+    )
+
+    return keyboard.get_keyboard()
+
+
+def empty_keyboard():
+    return VkKeyboard.get_empty_keyboard()
+
+
+# =========================================================
+# 7. ОТПРАВКА СООБЩЕНИЯ
+# =========================================================
+
+def send_message(peer_id, text, keyboard=None):
+
+    params = {
+        "peer_id": peer_id,
+        "random_id": random.randint(
+            1,
+            2_000_000_000
+        ),
+        "message": text
+    }
+
+    if keyboard is not None:
+        params["keyboard"] = keyboard
+
+    vk.messages.send(**params)
+
+
+# =========================================================
+# 8. PAYLOAD КНОПОК
+# =========================================================
+
+def get_payload(message):
+
+    payload = message.get("payload")
+
+    if not payload:
+        return {}
+
+    if isinstance(payload, dict):
+        return payload
+
+    try:
+        return json.loads(payload)
+
+    except Exception:
+        return {}
+
+
+# =========================================================
+# 9. ПОИСК КАНДИДАТОВ
+# =========================================================
+
+def normalize(text):
+
+    text = str(text).lower()
+
+    text = re.sub(
+        r"[^\w\s]",
+        " ",
+        text
+    )
+
+    return " ".join(text.split())
+
 
 def find_candidates(user_text):
 
-    words = (
-        user_text
-        .lower()
-        .replace(",", " ")
-        .replace(".", " ")
-        .replace("-", " ")
-        .split()
+    query = normalize(user_text)
+
+    query_words = set(
+        word
+        for word in query.split()
+        if len(word) >= 2
     )
 
     scored = []
 
     for material in MATERIALS:
 
-        searchable_text = " ".join([
-            str(material.get("title", "")),
-            str(material.get("topic", "")),
-            str(material.get("course", "")),
-            str(material.get("unit", "")),
-            str(material.get("age", "")),
-            str(material.get("type", "")),
-            str(material.get("description", ""))
-        ]).lower()
+        title = normalize(
+            material.get("title", "")
+        )
 
-        score = 0
+        course = normalize(
+            material.get("course", "")
+        )
 
-        for word in words:
-            if len(word) >= 3 and word in searchable_text:
-                score += 1
+        unit = normalize(
+            material.get("unit", "")
+        )
 
-        scored.append((score, material))
+        topic = normalize(
+            material.get("topic", "")
+        )
+
+        material_type = normalize(
+            material.get("type", "")
+        )
+
+        description = normalize(
+            material.get("description", "")
+        )
+
+        searchable = " ".join([
+            title,
+            course,
+            unit,
+            topic,
+            material_type,
+            description
+        ])
+
+        material_words = set(
+            searchable.split()
+        )
+
+        overlap = len(
+            query_words & material_words
+        )
+
+        similarity = SequenceMatcher(
+            None,
+            query,
+            " ".join([
+                course,
+                unit,
+                topic,
+                title
+            ])
+        ).ratio()
+
+        score = (
+            overlap * 3
+            + similarity
+        )
+
+        if overlap > 0 or similarity >= 0.22:
+            scored.append(
+                (score, material)
+            )
 
     scored.sort(
         key=lambda item: item[0],
         reverse=True
     )
 
-    matches = [
+    return [
         material
-        for score, material in scored
-        if score > 0
+        for score, material in scored[:10]
     ]
-
-    if matches:
-        return matches[:5]
-
-    return MATERIALS[:10]
 
 
 # =========================================================
-# 7. AI-ПОИСК
+# 10. ОТВЕТ AI
 # =========================================================
 
 def get_ai_answer(user_text):
 
-    candidates = find_candidates(user_text)
+    candidates = find_candidates(
+        user_text
+    )
+
+    # Если вообще ничего даже приблизительно
+    # не нашлось — не заставляем ИИ придумывать.
+    if not candidates:
+
+        return (
+            "🐰 Точного совпадения пока нет, "
+            "и близких материалов тоже не нашлось.\n\n"
+            "Попробуйте уточнить учебник, unit "
+            "или написать тему немного иначе."
+        )
 
     catalog_text = json.dumps(
         candidates,
@@ -136,25 +281,57 @@ def get_ai_answer(user_text):
     )
 
     prompt = f"""
-Ты — помощник по поиску учебных материалов
-сообщества ChattyBunny.
+Ты — поисковый помощник ChattyBunny.
 
 Запрос пользователя:
 {user_text}
 
-Материалы из каталога:
+Вот материалы-кандидаты из реального каталога:
 {catalog_text}
 
-Сформируй короткий ответ на русском языке.
+Твоя задача — помочь найти подходящий материал.
 
-Правила:
-- используй ТОЛЬКО материалы из предоставленного списка;
-- ничего не придумывай;
-- не придумывай ссылки;
-- выбери максимум 3 самых подходящих материала;
-- укажи название, кратко что это и ссылку;
-- если подходящего материала нет, честно скажи об этом;
-- не пиши длинное вступление.
+ВАЖНЫЕ ПРАВИЛА:
+
+1. Используй ТОЛЬКО материалы из списка.
+2. Никогда ничего не придумывай.
+3. Никогда не придумывай ссылки.
+4. Максимум 3 материала.
+5. Пиши по-русски.
+6. Пиши коротко, понятно и дружелюбно.
+7. НЕ используй Markdown.
+8. НЕ используй звёздочки ** вообще.
+9. Не пиши длинные вступления.
+10. Используй максимум 1–2 уместных эмодзи.
+
+Если есть хорошие совпадения, начни примерно так:
+
+🔎 Вот что нашлось по запросу ...
+
+Дальше для каждого материала:
+номер
+название
+одно короткое предложение
+ссылка
+
+Если ТОЧНОГО совпадения нет,
+но есть реально близкие материалы, напиши:
+
+🐰 Точного совпадения по ... не нашлось.
+Но вот несколько близких материалов:
+
+И покажи только действительно близкие варианты.
+
+Если предложенные кандидаты на самом деле
+не имеют отношения к запросу, честно напиши:
+
+🐰 Точного совпадения пока нет,
+и близких материалов тоже не нашлось.
+Попробуйте уточнить учебник, unit
+или написать тему немного иначе.
+
+НЕ добавляй фразу про BUNNY в конце.
+Она будет добавлена программой автоматически.
 """
 
     headers = {
@@ -181,52 +358,84 @@ def get_ai_answer(user_text):
         timeout=60
     )
 
-    print("KIE status:", response.status_code)
+    print(
+        "KIE status:",
+        response.status_code
+    )
 
     if response.status_code != 200:
 
-        print("KIE error:", response.text)
+        print(
+            "KIE error:",
+            response.text
+        )
 
         raise Exception(
-            f"KIE API вернул код {response.status_code}"
+            f"KIE API вернул код "
+            f"{response.status_code}"
         )
 
     result = response.json()
 
-    choices = result.get("choices")
+    choices = result.get(
+        "choices",
+        []
+    )
 
-    if choices:
+    if not choices:
+        raise Exception(
+            "ИИ вернул ответ без choices"
+        )
 
-        message = choices[0].get("message", {})
-        content = message.get("content")
+    answer = (
+        choices[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
 
-        if content:
-            return content.strip()
+    if not answer:
+        raise Exception(
+            "ИИ вернул пустой ответ"
+        )
 
-    raise Exception("ИИ вернул ответ без текста")
+    # На всякий случай убираем markdown-звёздочки,
+    # даже если модель вдруг их добавила.
+    answer = answer.replace("**", "")
+
+    return answer
 
 
 # =========================================================
-# 8. ОТПРАВКА В VK
+# 11. АКТИВАЦИЯ ПОИСКА
 # =========================================================
 
-def send_message(peer_id, text):
+def activate_search(peer_id):
 
-    vk.messages.send(
-        peer_id=peer_id,
-        random_id=random.randint(
-            1,
-            2_000_000_000
+    active_users.add(peer_id)
+
+    send_message(
+        peer_id,
+        (
+            "🐰 Заглядываю в архив ChattyBunny.\n\n"
+            "Напишите учебник, unit или тему.\n\n"
+            "Например:\n"
+            "• Go Getter 2 Unit 4\n"
+            "• Academy Stars 1 Unit 10\n"
+            "• phonics ch\n"
+            "• geographical features"
         ),
-        message=text
+        keyboard=empty_keyboard()
     )
 
 
 # =========================================================
-# 9. ОСНОВНОЙ ЦИКЛ
+# 12. ОСНОВНОЙ ЦИКЛ
 # =========================================================
 
-print("🐰 ChattyBunny Materials Finder запущен")
+print(
+    "🐰 ChattyBunny Materials Finder запущен"
+)
 
 
 while True:
@@ -237,88 +446,140 @@ while True:
 
         for event in longpoll.listen():
 
-            if event.type != VkBotEventType.MESSAGE_NEW:
+            if (
+                event.type
+                != VkBotEventType.MESSAGE_NEW
+            ):
                 continue
 
             message = event.object.message
 
-            # Не реагируем на собственные сообщения
+            # Игнорируем собственные сообщения сообщества
             if message.get("out") == 1:
                 continue
 
             peer_id = message["peer_id"]
-            text = message["text"].strip()
+            text = message.get(
+                "text",
+                ""
+            ).strip()
 
-            if not text:
+            payload = get_payload(
+                message
+            )
+
+            action = payload.get(
+                "action"
+            )
+
+
+            # =============================================
+            # КНОПКА: НОВЫЙ ПОИСК
+            # =============================================
+
+            if action == "new_search":
+
+                activate_search(
+                    peer_id
+                )
+
+                print(
+                    f"{peer_id}: новый поиск через кнопку"
+                )
+
                 continue
 
 
-            # =================================================
-            # ТОЧНАЯ АКТИВАЦИЯ
-            # =================================================
+            # =============================================
+            # КНОПКА: НАПИСАТЬ ПРЕПОДАВАТЕЛЮ
+            # =============================================
 
-            if text == "BUNNY":
+            if action == "teacher":
 
-                active_users.add(peer_id)
+                active_users.discard(
+                    peer_id
+                )
 
                 send_message(
                     peer_id,
                     (
-                        "🐰 Поиск материалов ChattyBunny включён!\n\n"
-                        "Напишите, что вы ищете.\n"
-                        "Например:\n"
-                        "• Academy Stars 1 Unit 2\n"
-                        "• Go Getter 2 Unit 4\n"
-                        "• phonics ch\n"
-                        "• natural disasters"
-                    )
+                        "💬 Просто напишите сообщение сюда — "
+                        "преподаватель его увидит и ответит."
+                    ),
+                    keyboard=empty_keyboard()
                 )
 
                 print(
-                    f"Пользователь {peer_id} активировал BUNNY"
+                    f"{peer_id}: переход к преподавателю"
                 )
 
                 continue
 
 
-            # =================================================
-            # ЕСЛИ BUNNY НЕ АКТИВИРОВАН — МОЛЧИМ
-            # =================================================
+            # =============================================
+            # ТОЛЬКО ТОЧНОЕ BUNNY
+            # =============================================
+
+            if text == "BUNNY":
+
+                activate_search(
+                    peer_id
+                )
+
+                print(
+                    f"{peer_id}: активировал BUNNY"
+                )
+
+                continue
+
+
+            # =============================================
+            # ВСЕ ОСТАЛЬНЫЕ СООБЩЕНИЯ БОТ ИГНОРИРУЕТ,
+            # ЕСЛИ ПОИСК НЕ БЫЛ АКТИВИРОВАН
+            # =============================================
 
             if peer_id not in active_users:
                 continue
 
 
-            # =================================================
-            # ПОЛУЧИЛИ ОДИН ПОИСКОВЫЙ ЗАПРОС
-            # =================================================
+            # =============================================
+            # ОДИН ПОИСКОВЫЙ ЗАПРОС
+            # =============================================
 
-            # Сразу выключаем режим поиска.
-            # Поэтому любые дальнейшие сообщения бот игнорирует,
-            # пока человек снова не напишет BUNNY.
+            active_users.discard(
+                peer_id
+            )
 
-            active_users.discard(peer_id)
+            if not text:
+                continue
 
             print()
-            print("Поисковый запрос:", text)
+            print(
+                "Поисковый запрос:",
+                text
+            )
 
 
             try:
 
-                answer = get_ai_answer(text)
+                answer = get_ai_answer(
+                    text
+                )
 
-                print("AI успешно ответил")
+                print(
+                    "AI успешно ответил"
+                )
 
 
             except requests.exceptions.ReadTimeout:
 
                 print(
-                    "KIE не успел ответить за 60 секунд"
+                    "KIE timeout"
                 )
 
                 answer = (
-                    "Поиск занял слишком много времени. "
-                    "Попробуйте ещё раз: сначала отправьте BUNNY."
+                    "🐰 Поиск занял слишком много времени.\n\n"
+                    "Попробуйте запустить новый поиск."
                 )
 
 
@@ -330,21 +591,29 @@ while True:
                 )
 
                 answer = (
-                    "Сейчас не получилось выполнить поиск. "
-                    "Чтобы попробовать ещё раз, отправьте BUNNY."
+                    "🐰 Сейчас не получилось выполнить поиск.\n\n"
+                    "Попробуйте ещё раз чуть позже."
                 )
+
+
+            final_answer = (
+                answer
+                + "\n\n"
+                + "Для нового поиска снова отправьте BUNNY."
+            )
 
 
             send_message(
                 peer_id,
-                answer
+                final_answer,
+                keyboard=result_keyboard()
             )
 
 
     except Exception as error:
 
         print(
-            "Ошибка VK:",
+            "Ошибка соединения с VK:",
             repr(error)
         )
 
