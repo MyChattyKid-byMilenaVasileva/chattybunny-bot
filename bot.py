@@ -20,14 +20,14 @@ VK_TOKEN = os.getenv("VK_TOKEN")
 KIE_API_KEY = os.getenv("KIE_API_KEY")
 
 if not VK_TOKEN:
-    raise ValueError("Не найден VK_TOKEN в файле .env")
+    raise ValueError("Не найден VK_TOKEN")
 
 if not KIE_API_KEY:
-    raise ValueError("Не найден KIE_API_KEY в файле .env")
+    raise ValueError("Не найден KIE_API_KEY")
 
 
 # =========================================================
-# 2. ЗАГРУЖАЕМ КАТАЛОГ МАТЕРИАЛОВ
+# 2. КАТАЛОГ МАТЕРИАЛОВ
 # =========================================================
 
 with open("materials.json", "r", encoding="utf-8") as file:
@@ -35,7 +35,7 @@ with open("materials.json", "r", encoding="utf-8") as file:
 
 
 # =========================================================
-# 3. ПОДКЛЮЧЕНИЕ К VK
+# 3. VK
 # =========================================================
 
 vk_session = vk_api.VkApi(token=VK_TOKEN)
@@ -50,7 +50,7 @@ def create_longpoll():
 
 
 # =========================================================
-# 4. KIE AI
+# 4. KIE
 # =========================================================
 
 KIE_URL = (
@@ -60,14 +60,19 @@ KIE_URL = (
 
 
 # =========================================================
-# 5. ПРЕДВАРИТЕЛЬНЫЙ ПОИСК ПО КАТАЛОГУ
+# 5. АКТИВИРОВАННЫЕ ПОЛЬЗОВАТЕЛИ
+# =========================================================
+
+# Здесь хранятся пользователи,
+# которые отправили точное слово BUNNY
+active_users = set()
+
+
+# =========================================================
+# 6. ПРЕДВАРИТЕЛЬНЫЙ ПОИСК
 # =========================================================
 
 def find_candidates(user_text):
-    """
-    Сначала Python сам находит наиболее похожие позиции.
-    ИИ получает уже небольшой список, поэтому отвечает быстрее.
-    """
 
     words = (
         user_text
@@ -105,7 +110,6 @@ def find_candidates(user_text):
         reverse=True
     )
 
-    # Если нашли совпадения — передаём ИИ лучшие.
     matches = [
         material
         for score, material in scored
@@ -115,12 +119,11 @@ def find_candidates(user_text):
     if matches:
         return matches[:5]
 
-    # Если запрос слишком общий — небольшой кусок каталога.
-    return MATERIALS[:7]
+    return MATERIALS[:10]
 
 
 # =========================================================
-# 6. ЗАПРОС К ИИ
+# 7. AI-ПОИСК
 # =========================================================
 
 def get_ai_answer(user_text):
@@ -139,18 +142,18 @@ def get_ai_answer(user_text):
 Запрос пользователя:
 {user_text}
 
-Вот подходящие позиции из каталога:
+Материалы из каталога:
 {catalog_text}
 
 Сформируй короткий ответ на русском языке.
 
 Правила:
-- используй ТОЛЬКО материалы из этого списка;
+- используй ТОЛЬКО материалы из предоставленного списка;
 - ничего не придумывай;
 - не придумывай ссылки;
-- выбери максимум 3 материала;
-- укажи название, коротко зачем подходит и ссылку;
-- если ничего подходящего нет, честно скажи об этом;
+- выбери максимум 3 самых подходящих материала;
+- укажи название, кратко что это и ссылку;
+- если подходящего материала нет, честно скажи об этом;
 - не пиши длинное вступление.
 """
 
@@ -181,6 +184,7 @@ def get_ai_answer(user_text):
     print("KIE status:", response.status_code)
 
     if response.status_code != 200:
+
         print("KIE error:", response.text)
 
         raise Exception(
@@ -189,47 +193,21 @@ def get_ai_answer(user_text):
 
     result = response.json()
 
-    # OpenAI-compatible ответ
     choices = result.get("choices")
 
     if choices:
+
         message = choices[0].get("message", {})
         content = message.get("content")
 
         if content:
             return content.strip()
 
-    # Запасной вариант, если KIE вернёт Gemini-формат
-    candidates_response = result.get("candidates")
-
-    if candidates_response:
-        content = candidates_response[0].get(
-            "content",
-            {}
-        )
-
-        parts = content.get("parts", [])
-
-        texts = []
-
-        for part in parts:
-            text = part.get("text")
-
-            if text:
-                texts.append(text)
-
-        if texts:
-            return "\n".join(texts).strip()
-
-    print("Неожиданный ответ KIE:", result)
-
-    raise Exception(
-        "ИИ вернул ответ без текста"
-    )
+    raise Exception("ИИ вернул ответ без текста")
 
 
 # =========================================================
-# 7. ОТПРАВКА СООБЩЕНИЯ В VK
+# 8. ОТПРАВКА В VK
 # =========================================================
 
 def send_message(peer_id, text):
@@ -245,7 +223,7 @@ def send_message(peer_id, text):
 
 
 # =========================================================
-# 8. ОСНОВНОЙ ЦИКЛ БОТА
+# 9. ОСНОВНОЙ ЦИКЛ
 # =========================================================
 
 print("🐰 ChattyBunny Materials Finder запущен")
@@ -264,7 +242,7 @@ while True:
 
             message = event.object.message
 
-            # Не реагируем на собственные исходящие сообщения
+            # Не реагируем на собственные сообщения
             if message.get("out") == 1:
                 continue
 
@@ -274,15 +252,63 @@ while True:
             if not text:
                 continue
 
+
+            # =================================================
+            # ТОЧНАЯ АКТИВАЦИЯ
+            # =================================================
+
+            if text == "BUNNY":
+
+                active_users.add(peer_id)
+
+                send_message(
+                    peer_id,
+                    (
+                        "🐰 Поиск материалов ChattyBunny включён!\n\n"
+                        "Напишите, что вы ищете.\n"
+                        "Например:\n"
+                        "• Academy Stars 1 Unit 2\n"
+                        "• Go Getter 2 Unit 4\n"
+                        "• phonics ch\n"
+                        "• natural disasters"
+                    )
+                )
+
+                print(
+                    f"Пользователь {peer_id} активировал BUNNY"
+                )
+
+                continue
+
+
+            # =================================================
+            # ЕСЛИ BUNNY НЕ АКТИВИРОВАН — МОЛЧИМ
+            # =================================================
+
+            if peer_id not in active_users:
+                continue
+
+
+            # =================================================
+            # ПОЛУЧИЛИ ОДИН ПОИСКОВЫЙ ЗАПРОС
+            # =================================================
+
+            # Сразу выключаем режим поиска.
+            # Поэтому любые дальнейшие сообщения бот игнорирует,
+            # пока человек снова не напишет BUNNY.
+
+            active_users.discard(peer_id)
+
             print()
-            print("Запрос:", text)
+            print("Поисковый запрос:", text)
+
 
             try:
 
                 answer = get_ai_answer(text)
 
                 print("AI успешно ответил")
-                print("Ответ:", answer)
+
 
             except requests.exceptions.ReadTimeout:
 
@@ -292,20 +318,9 @@ while True:
 
                 answer = (
                     "Поиск занял слишком много времени. "
-                    "Попробуйте повторить запрос."
+                    "Попробуйте ещё раз: сначала отправьте BUNNY."
                 )
 
-            except requests.exceptions.RequestException as error:
-
-                print(
-                    "Ошибка соединения с KIE:",
-                    repr(error)
-                )
-
-                answer = (
-                    "Сейчас сервис поиска временно недоступен. "
-                    "Попробуйте ещё раз чуть позже."
-                )
 
             except Exception as error:
 
@@ -316,58 +331,25 @@ while True:
 
                 answer = (
                     "Сейчас не получилось выполнить поиск. "
-                    "Попробуйте ещё раз чуть позже."
-                )
-
-            try:
-
-                send_message(
-                    peer_id,
-                    answer
-                )
-
-            except Exception as error:
-
-                print(
-                    "Ошибка отправки в VK:",
-                    repr(error)
+                    "Чтобы попробовать ещё раз, отправьте BUNNY."
                 )
 
 
-    except requests.exceptions.ReadTimeout:
-
-        # VK Long Poll иногда сам обрывает соединение.
-        # Бот просто подключится заново.
-        print(
-            "VK Long Poll timeout. Переподключаюсь..."
-        )
-
-        time.sleep(2)
-
-
-    except requests.exceptions.RequestException as error:
-
-        print(
-            "Ошибка соединения с VK:",
-            repr(error)
-        )
-
-        print(
-            "Повторное подключение через 5 секунд..."
-        )
-
-        time.sleep(5)
+            send_message(
+                peer_id,
+                answer
+            )
 
 
     except Exception as error:
 
         print(
-            "Ошибка VK Long Poll:",
+            "Ошибка VK:",
             repr(error)
         )
 
         print(
-            "Повторное подключение через 5 секунд..."
+            "Переподключаюсь через 5 секунд..."
         )
 
         time.sleep(5)
