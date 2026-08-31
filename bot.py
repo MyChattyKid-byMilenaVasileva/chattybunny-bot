@@ -29,7 +29,6 @@ if not KIE_API_KEY:
     raise ValueError("Не найден KIE_API_KEY")
 
 
-# ID сообщества ChattyBunny
 GROUP_ID = 225157002
 
 KIE_URL = (
@@ -65,8 +64,6 @@ def create_longpoll():
 # СОСТОЯНИЕ
 # =========================================================
 
-# Пользователь попадает сюда только после ТОЧНОГО сообщения BUNNY.
-# После одного поискового запроса он автоматически удаляется.
 active_users = set()
 
 
@@ -102,7 +99,7 @@ def empty_keyboard():
 
 
 # =========================================================
-# ОТПРАВКА СООБЩЕНИЯ
+# ОТПРАВКА
 # =========================================================
 
 def send_message(peer_id, text, keyboard=None):
@@ -123,7 +120,7 @@ def send_message(peer_id, text, keyboard=None):
 
 
 # =========================================================
-# PAYLOAD КНОПОК
+# PAYLOAD
 # =========================================================
 
 def get_payload(message):
@@ -256,16 +253,70 @@ def find_candidates(user_text):
 
 
 # =========================================================
-# РАЗБОР ОТВЕТА KIE
+# FALLBACK БЕЗ AI
+# =========================================================
+
+def fallback_answer(user_text, candidates):
+
+    if not candidates:
+
+        return (
+            "🐰 Точного совпадения пока нет, "
+            "и близких материалов тоже не нашлось.\n\n"
+            "Попробуйте уточнить учебник, unit "
+            "или написать тему немного иначе."
+        )
+
+    top = candidates[:3]
+
+    lines = [
+        f"🐰 Точного совпадения по {user_text} не нашлось.",
+        "Но вот несколько близких материалов:",
+        ""
+    ]
+
+    for index, material in enumerate(top, start=1):
+
+        title = material.get(
+            "title",
+            "Материал"
+        )
+
+        description = material.get(
+            "description",
+            ""
+        )
+
+        url = (
+            material.get("url")
+            or material.get("link")
+            or ""
+        )
+
+        lines.append(
+            f"{index}. {title}"
+        )
+
+        if description:
+            lines.append(
+                description
+            )
+
+        if url:
+            lines.append(
+                f"Ссылка: {url}"
+            )
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# =========================================================
+# РАЗБОР KIE
 # =========================================================
 
 def parse_kie_answer(result):
-
-    # -----------------------------------------------------
-    # Вариант 1:
-    # OpenAI-совместимый ответ
-    # choices[0].message.content
-    # -----------------------------------------------------
 
     choices = result.get("choices")
 
@@ -280,7 +331,6 @@ def parse_kie_answer(result):
         if isinstance(content, str) and content.strip():
             return content.strip()
 
-        # Иногда content может быть массивом частей
         if isinstance(content, list):
 
             texts = []
@@ -292,17 +342,15 @@ def parse_kie_answer(result):
                     text = part.get("text")
 
                     if text:
-                        texts.append(str(text))
+                        texts.append(
+                            str(text)
+                        )
 
             if texts:
-                return "\n".join(texts).strip()
+                return "\n".join(
+                    texts
+                ).strip()
 
-
-    # -----------------------------------------------------
-    # Вариант 2:
-    # Gemini-формат
-    # candidates[0].content.parts[].text
-    # -----------------------------------------------------
 
     candidates = result.get("candidates")
 
@@ -323,38 +371,39 @@ def parse_kie_answer(result):
                 text = part.get("text")
 
                 if text:
-                    texts.append(str(text))
+                    texts.append(
+                        str(text)
+                    )
 
         if texts:
-            return "\n".join(texts).strip()
+            return "\n".join(
+                texts
+            ).strip()
 
 
-    # -----------------------------------------------------
-    # Вариант 3:
-    # Некоторые API кладут текст прямо в поле response
-    # -----------------------------------------------------
+    response_text = result.get(
+        "response"
+    )
 
-    response_text = result.get("response")
+    if isinstance(
+        response_text,
+        str
+    ) and response_text.strip():
 
-    if isinstance(response_text, str) and response_text.strip():
         return response_text.strip()
 
 
-    # -----------------------------------------------------
-    # Вариант 4:
-    # Иногда встречается output_text
-    # -----------------------------------------------------
+    output_text = result.get(
+        "output_text"
+    )
 
-    output_text = result.get("output_text")
+    if isinstance(
+        output_text,
+        str
+    ) and output_text.strip():
 
-    if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
 
-
-    # -----------------------------------------------------
-    # Если формат снова окажется новым —
-    # выводим реальный JSON в терминал.
-    # -----------------------------------------------------
 
     print(
         "Неожиданный ответ KIE:",
@@ -372,92 +421,10 @@ def parse_kie_answer(result):
 
 
 # =========================================================
-# AI-ПОИСК
+# ОДНА ПОПЫТКА KIE
 # =========================================================
 
-def get_ai_answer(user_text):
-
-    candidates = find_candidates(
-        user_text
-    )
-
-    if not candidates:
-
-        return (
-            "🐰 Точного совпадения пока нет, "
-            "и близких материалов тоже не нашлось.\n\n"
-            "Попробуйте уточнить учебник, unit "
-            "или написать тему немного иначе."
-        )
-
-    catalog_text = json.dumps(
-        candidates,
-        ensure_ascii=False
-    )
-
-    prompt = f"""
-Ты — поисковый помощник ChattyBunny.
-
-Пользователь ищет:
-{user_text}
-
-Вот реальные материалы-кандидаты из каталога:
-{catalog_text}
-
-ТВОЯ ЗАДАЧА:
-найти самые подходящие материалы для запроса пользователя.
-
-ПРАВИЛА:
-
-1. Используй только материалы из списка выше.
-2. Ничего не придумывай.
-3. Не придумывай ссылки.
-4. Максимум 3 результата.
-5. Отвечай по-русски.
-6. Не используй Markdown.
-7. Не используй звёздочки.
-8. Стиль короткий, понятный и дружелюбный.
-9. Максимум 1–2 эмодзи.
-10. Не используй канцелярские фразы.
-11. Не пиши длинное вступление.
-12. Если точного совпадения нет, попробуй найти действительно близкие материалы.
-13. Не предлагай случайные материалы только ради того, чтобы что-то показать.
-
-ЕСЛИ ЕСТЬ ХОРОШИЕ СОВПАДЕНИЯ:
-
-🔎 Вот что нашлось по запросу [запрос]:
-
-1. Название
-Короткое описание.
-Ссылка: ...
-
-2. Название
-Короткое описание.
-Ссылка: ...
-
-ЕСЛИ ТОЧНОГО СОВПАДЕНИЯ НЕТ,
-НО ЕСТЬ ДЕЙСТВИТЕЛЬНО БЛИЗКИЕ МАТЕРИАЛЫ:
-
-🐰 Точного совпадения по [запрос] не нашлось.
-Но вот несколько близких материалов:
-
-1. Название
-Короткое описание.
-Ссылка: ...
-
-2. Название
-Короткое описание.
-Ссылка: ...
-
-ЕСЛИ НИЧЕГО ПОДХОДЯЩЕГО НЕТ:
-
-🐰 Точного совпадения пока нет, и близких материалов тоже не нашлось.
-
-Попробуйте уточнить учебник, unit или написать тему немного иначе.
-
-НЕ добавляй в конце предложение про BUNNY.
-Программа добавит его автоматически.
-"""
+def request_kie(prompt):
 
     headers = {
         "Authorization": f"Bearer {KIE_API_KEY}",
@@ -480,7 +447,7 @@ def get_ai_answer(user_text):
         KIE_URL,
         headers=headers,
         json=data,
-        timeout=60
+        timeout=45
     )
 
     print(
@@ -491,38 +458,160 @@ def get_ai_answer(user_text):
 
     if response.status_code != 200:
 
-        print(
-            "KIE error:",
-            response.text,
-            flush=True
-        )
-
         raise Exception(
-            f"KIE API: {response.status_code}"
+            f"KIE HTTP {response.status_code}"
         )
 
     result = response.json()
 
-    answer = parse_kie_answer(
+    # У KIE иногда HTTP 200,
+    # но внутри приходит ошибка code 524
+    if result.get("code"):
+
+        raise Exception(
+            f"KIE code {result.get('code')}: "
+            f"{result.get('msg', '')}"
+        )
+
+    return parse_kie_answer(
         result
     )
 
-    if not answer:
-        raise Exception(
-            "KIE вернул пустой текст"
-        )
 
-    # VK не рендерит Markdown-звёздочки нормально.
-    answer = answer.replace(
-        "**",
-        ""
+# =========================================================
+# AI-ПОИСК С RETRY
+# =========================================================
+
+def get_ai_answer(user_text):
+
+    candidates = find_candidates(
+        user_text
     )
 
-    return answer
+    if not candidates:
+
+        return fallback_answer(
+            user_text,
+            candidates
+        )
+
+    catalog_text = json.dumps(
+        candidates,
+        ensure_ascii=False
+    )
+
+    prompt = f"""
+Ты — поисковый помощник ChattyBunny.
+
+Пользователь ищет:
+{user_text}
+
+Вот реальные материалы-кандидаты:
+{catalog_text}
+
+Правила:
+
+- используй только материалы из списка;
+- ничего не придумывай;
+- не придумывай ссылки;
+- максимум 3 результата;
+- отвечай по-русски;
+- не используй Markdown;
+- не используй звёздочки;
+- стиль короткий и дружелюбный;
+- максимум 1–2 эмодзи;
+- если точного совпадения нет,
+  предложи только действительно близкие материалы;
+- не предлагай случайные материалы.
+
+Если есть хорошие совпадения:
+
+🔎 Вот что нашлось по запросу [запрос]:
+
+1. Название
+Короткое описание.
+Ссылка: ...
+
+Если точного совпадения нет,
+но есть близкие материалы:
+
+🐰 Точного совпадения по [запрос] не нашлось.
+Но вот несколько близких материалов:
+
+1. Название
+Короткое описание.
+Ссылка: ...
+
+Если ничего подходящего нет:
+
+🐰 Точного совпадения пока нет,
+и близких материалов тоже не нашлось.
+
+Попробуйте уточнить учебник,
+unit или тему.
+
+Не добавляй фразу про BUNNY.
+"""
+
+    # Максимум 3 попытки
+    for attempt in range(1, 4):
+
+        try:
+
+            print(
+                f"KIE попытка {attempt}/3",
+                flush=True
+            )
+
+            answer = request_kie(
+                prompt
+            )
+
+            answer = answer.replace(
+                "**",
+                ""
+            )
+
+            return answer
+
+
+        except Exception as error:
+
+            print(
+                f"KIE ошибка на попытке {attempt}:",
+                repr(error),
+                flush=True
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 2
+
+                print(
+                    f"Повтор через {wait_seconds} сек.",
+                    flush=True
+                )
+
+                time.sleep(
+                    wait_seconds
+                )
+
+
+    # Все три попытки KIE провалились.
+    # Выдаём локальный результат.
+    print(
+        "KIE недоступен. Использую локальный fallback.",
+        flush=True
+    )
+
+    return fallback_answer(
+        user_text,
+        candidates
+    )
 
 
 # =========================================================
-# АКТИВАЦИЯ ПОИСКА
+# АКТИВАЦИЯ
 # =========================================================
 
 def activate_search(peer_id):
@@ -574,7 +663,6 @@ while True:
 
             message = event.object.message
 
-            # Бот не реагирует на собственные сообщения сообщества.
             if message.get("out") == 1:
                 continue
 
@@ -595,15 +683,10 @@ while True:
 
 
             # =================================================
-            # КНОПКА: НОВЫЙ ПОИСК
+            # НОВЫЙ ПОИСК
             # =================================================
 
             if action == "new_search":
-
-                print(
-                    f"{peer_id}: новый поиск",
-                    flush=True
-                )
 
                 activate_search(
                     peer_id
@@ -613,7 +696,7 @@ while True:
 
 
             # =================================================
-            # КНОПКА: НАПИСАТЬ ПРЕПОДАВАТЕЛЮ
+            # ПРЕПОДАВАТЕЛЬ
             # =================================================
 
             if action == "teacher":
@@ -633,35 +716,14 @@ while True:
                     keyboard=empty_keyboard()
                 )
 
-                print(
-                    f"{peer_id}: переход к преподавателю",
-                    flush=True
-                )
-
                 continue
 
 
             # =================================================
-            # АКТИВАТОР
-            #
-            # Работает исключительно точное сообщение:
-            #
             # BUNNY
-            #
-            # bunny
-            # Bunny
-            # BUNNY!
-            # Привет BUNNY
-            #
-            # НЕ активируют поиск.
             # =================================================
 
             if text == "BUNNY":
-
-                print(
-                    f"{peer_id}: BUNNY",
-                    flush=True
-                )
 
                 activate_search(
                     peer_id
@@ -671,8 +733,7 @@ while True:
 
 
             # =================================================
-            # ЕСЛИ ПОИСК НЕ АКТИВИРОВАН —
-            # БОТ ПОЛНОСТЬЮ МОЛЧИТ
+            # ОБЫЧНОЕ СООБЩЕНИЕ
             # =================================================
 
             if peer_id not in active_users:
@@ -680,7 +741,7 @@ while True:
 
 
             # =================================================
-            # ОДИН ПОИСКОВЫЙ ЗАПРОС
+            # ПОИСК
             # =================================================
 
             active_users.discard(
@@ -695,38 +756,27 @@ while True:
                 flush=True
             )
 
-
             try:
 
                 answer = get_ai_answer(
                     text
                 )
 
-
-            except requests.exceptions.ReadTimeout:
-
-                print(
-                    "KIE timeout",
-                    flush=True
-                )
-
-                answer = (
-                    "🐰 Поиск занял слишком много времени.\n\n"
-                    "Попробуйте ещё раз чуть позже."
-                )
-
-
             except Exception as error:
 
                 print(
-                    "Ошибка AI:",
+                    "Ошибка поиска:",
                     repr(error),
                     flush=True
                 )
 
-                answer = (
-                    "🐰 Сейчас не получилось выполнить поиск.\n\n"
-                    "Попробуйте ещё раз чуть позже."
+                candidates = find_candidates(
+                    text
+                )
+
+                answer = fallback_answer(
+                    text,
+                    candidates
                 )
 
 
